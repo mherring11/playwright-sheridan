@@ -4,6 +4,7 @@ const path = require("path");
 const { PNG } = require("pngjs");
 const sharp = require("sharp");
 const config = require("../config.js");
+const axios = require("axios");
 
 let pixelmatch;
 let chalk;
@@ -377,71 +378,102 @@ test.describe("Visual Comparison Tests", () => {
       console.log(chalk.green(`Found ${imageCount} images on the page.`));
 
       let brokenImages = 0;
+      let trackingPixels = 0;
+      let checkedImages = 0;
 
+      // Extract and prepare all image URLs
+      const imageUrls = [];
       for (let i = 0; i < imageCount; i++) {
         let imageUrl = await images.nth(i).getAttribute("src");
 
         if (!imageUrl) {
           console.log(
-            chalk.yellow(`Image ${i + 1} does not have a valid src attribute.`)
+            chalk.yellow(`Warning: Image ${i + 1} is missing a src attribute.`)
           );
           brokenImages++;
           continue;
         }
 
-        // Handle relative and protocol-relative URLs
+        // Resolve relative URLs
         if (!imageUrl.startsWith("http") && !imageUrl.startsWith("//")) {
           imageUrl = new URL(imageUrl, url).toString();
         } else if (imageUrl.startsWith("//")) {
           imageUrl = `https:${imageUrl}`;
         }
 
-        // Exclude known tracking pixels or problematic URLs
+        // Ignore tracking pixels
         if (
           imageUrl.includes("bat.bing.com") ||
           imageUrl.includes("tracking")
         ) {
-          console.log(
-            chalk.yellow(
-              `Image ${i + 1} is a tracking pixel or excluded URL: ${imageUrl}`
-            )
-          );
+          console.log(chalk.yellow(`Skipping tracking pixel: ${imageUrl}`));
+          trackingPixels++;
           continue;
         }
 
-        try {
-          console.log(chalk.blue(`Checking image ${i + 1}: ${imageUrl}`));
-          const response = await axios.get(imageUrl);
+        imageUrls.push({ index: i + 1, imageUrl });
+      }
 
-          if (response.status !== 200) {
-            console.log(
-              chalk.red(
-                `Image ${i + 1} failed to load. Status Code: ${response.status}`
-              )
-            );
-            brokenImages++;
-          } else {
-            console.log(chalk.green(`Image ${i + 1} loaded successfully.`));
-          }
-        } catch (error) {
+      console.log(chalk.blue(`Checking ${imageUrls.length} valid images...`));
+
+      // **Check all images concurrently for faster performance**
+      const imageChecks = await Promise.allSettled(
+        imageUrls.map(({ index, imageUrl }) =>
+          axios
+            .get(imageUrl)
+            .then((response) => ({
+              index,
+              imageUrl,
+              status: response.status,
+            }))
+            .catch((error) => ({
+              index,
+              imageUrl,
+              error: error.response
+                ? `Status: ${error.response.status}`
+                : error.message,
+            }))
+        )
+      );
+
+      // **Process results**
+      for (const result of imageChecks) {
+        if (result.status === "fulfilled") {
           console.log(
-            chalk.red(`Image ${i + 1} failed to load. Error: ${error.message}`)
+            chalk.green(
+              `✅ Image ${result.value.index} loaded successfully: ${result.value.imageUrl}`
+            )
+          );
+        } else {
+          console.log(
+            chalk.red(
+              `❌ Image ${result.reason.index} failed: ${result.reason.imageUrl} (${result.reason.error})`
+            )
           );
           brokenImages++;
         }
+        checkedImages++;
       }
+
+      // **Final results per page**
+      console.log(chalk.blue(`Summary for ${url}:`));
+      console.log(
+        chalk.green(`✅ Valid images: ${checkedImages - brokenImages}`)
+      );
+      console.log(chalk.red(`❌ Broken images: ${brokenImages}`));
+      console.log(
+        chalk.yellow(`⚠️ Skipped tracking pixels: ${trackingPixels}`)
+      );
 
       if (brokenImages > 0) {
         console.log(
           chalk.red(
-            `Test failed for ${url}. Found ${brokenImages} broken images on the page.`
+            `🚨 Test failed for ${url}. ${brokenImages} broken images detected.`
           )
         );
       } else {
         console.log(
-          chalk.green(
-            `Test passed for ${url}. No broken images found on the page.`
-          )
+          chalk.green(`✅ Test passed for ${url}. No broken images found.`)
         );
       }
     }
